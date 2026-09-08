@@ -60,7 +60,25 @@ void Messenger::enqueueReceive(ChannelId channelId, ReceivePromise::Pointer prom
 void Messenger::enqueueSend(Message::Pointer message, SendPromise::Pointer promise)
 {
     sendStrand_.dispatch([this, self = this->shared_from_this(), message = std::move(message), promise = std::move(promise)]() mutable {
-        channelSendPromiseQueue_.emplace_back(std::make_pair(std::move(message), std::move(promise)));
+        // channelSendPromiseQueue_ is a single FIFO shared by every channel -
+        // over a slow/lossy link (wireless, unlike USB) video frames queue up
+        // multiple deep, and without this an INPUT (touch/pan) message lands
+        // behind all of them, showing up as growing input lag as the link
+        // gets worse (see conversation - "map movement isn't smooth" over
+        // WiFi, fine over USB). Jumping it to just past the head - never
+        // ahead of whatever's already mid-send, only ahead of what's merely
+        // queued - keeps per-channel ordering intact (each channel's own
+        // messages, e.g. video's FIRST/MIDDLE/LAST chunks, still go out as
+        // one atomic stream() call) while giving input priority over
+        // whatever else was waiting.
+        if(message->getChannelId() == ChannelId::INPUT && !channelSendPromiseQueue_.empty())
+        {
+            channelSendPromiseQueue_.emplace(std::next(channelSendPromiseQueue_.begin()), std::make_pair(std::move(message), std::move(promise)));
+        }
+        else
+        {
+            channelSendPromiseQueue_.emplace_back(std::make_pair(std::move(message), std::move(promise)));
+        }
 
         if(channelSendPromiseQueue_.size() == 1)
         {
